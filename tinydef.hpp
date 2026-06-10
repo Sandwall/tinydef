@@ -2,12 +2,26 @@
 
 /* tinydef.hpp - sandwall
  * ======================
- * This is a header that defines shorthand names for common primitives, useful math constants/functions,
- * simple data structures, as well as memory abstraction data structures.
+ * This is a small header/single file library that:
+ *
+ * - defines shorthand names for common primitives
+ * - does the same for useful math constants/functions
+ * - defines simple and reusable data structures
+ * - implements a few memory abstraction data structures
  */
 
 #if defined(_WIN32)
 #define USING_WIN32
+
+// NOTE: windows defines min() max() macros that replace tim::min and tim::max for some reason
+// to work around this, we define NOMINMAX in the case that this file is included before <windows.h>,
+// and we undefine min/max in the case that the file is included after <windows.h> without NOMINMAX
+// ... In the case that some code breaks due to being dependent on the <windows.h> min and max,
+//     the solution would probably be to 
+#define NOMINMAX
+#undef min
+#undef max
+
 #elif defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #define USING_UNIX
 #endif
@@ -16,11 +30,12 @@
 #include <assert.h>
 
 // i'm not so keen on these includes, will hopefully find a way to get rid of it later
+#include <stdlib.h> // for malloc, calloc and free
 #include <string.h> // for memset
 #include <math.h>   // for exp and expf
 
-#define TINY_BEGIN_NAMESPACE(name) namespace name {
-#define TINY_END_NAMESPACE }
+// Use this macro only on structures/simple objects. Should work similar to Win32 ZeroMemory
+#define TINY_ZERO(zeroTarget) memset((void*)&zeroTarget, 0, sizeof(zeroTarget))
 
 using i8 = int8_t;
 using u8 = uint8_t;
@@ -46,20 +61,17 @@ namespace tim {
 		return x;
 	}
 
-	template <typename T>
-	constexpr T min(T a, T b) {
+	template <typename T> constexpr T min(T a, T b) {
 		if (a < b) return a;
 		return b;
 	}
 
-	template <typename T>
-	constexpr T max(T a, T b) {
+	template <typename T> constexpr T max(T a, T b) {
 		if (a > b) return a;
 		return b;
 	}
 
-	template <typename T>
-	constexpr T clamp(T x, T min, T max) {
+	template <typename T> constexpr T clamp(T x, T min, T max) {
 		if (x >= max) return max;
 		if (x <= min) return min;
 		return x;
@@ -67,22 +79,19 @@ namespace tim {
 
 	// This function extends clamp to strictly keep a value in between a range
 	// doesn't matter the order of the range arguments
-	template <typename T>
-	constexpr T between(T x, T side1, T side2) {
+	template <typename T> constexpr T between(T x, T side1, T side2) {
 		if (side1 == side2) return side1;
 		return (side2 < side1) ?
 			clamp(x, side2, side1) :
 			clamp(x, side1, side2);
 	}
 
-	template<typename T>
-	constexpr T abs(T x) {
+	template<typename T> constexpr T abs(T x) {
 		return x > 0 ? x : -x;
 	}
 
 	// takes a position and a length, and just returns an index into a circular buffer
-	template<typename T>
-	constexpr T circ_idx(T i, T len) {
+	template<typename T> constexpr T circ_idx(T i, T len) {
 		T result = i % len;
 		return result < 0 ? result + len : result;
 	}
@@ -100,7 +109,25 @@ namespace tim {
 
 // TDS = Tiny Data Structures
 namespace tds {
-	// this ministruct allows treating data as a circular buffer
+	// ministruct: static-sized T array
+	template<typename T, u32 Capacity>
+	struct Array {
+		static constexpr u32 length = Capacity;
+		T data[length];
+
+		operator T* () { return data; }
+
+		T& operator[](i64 i) {
+			assert(i >= 0 && i < static_cast<i64>(length));
+			return data[i];
+		}
+
+		void zero() {
+			memset(data, 0, Capacity * sizeof(T));
+		}
+	};
+
+	// ministruct: circular buffer
 	template<typename T>
 	struct RingSlice {
 		T* data;
@@ -111,7 +138,7 @@ namespace tds {
 		}
 	};
 
-	// this ministruct allows treating data as a T array
+	// ministruct: non-stack allocated T array
 	template<typename T>
 	struct Slice {
 		T* data;
@@ -121,11 +148,119 @@ namespace tds {
 			assert(i >= 0 && i < static_cast<i64>(len));
 			return data[i];
 		}
+
+		// shorthand for allocating a Slice<T> using malloc
+		static Slice<T> alloc(size_t numElements) {
+			Slice<T> slice = { 0 };
+
+			slice.data = static_cast<T*>(malloc(numElements * sizeof(T)));
+
+			if (slice.data)
+				slice.len = numElements;
+
+			return slice;
+		}
+
+		// shorthand for allocating a Slice<T> using calloc
+		static Slice<T> alloc0(size_t numElements) {
+			Slice<T> slice = { 0 };
+
+			slice.data = static_cast<T*>(calloc(numElements, sizeof(T)));
+
+			if (slice.data)
+				slice.len = numElements;
+
+			return slice;
+		}
+
+		// shorthand for freeing a Slice<T> using free
+		static void free(Slice<T>& slice) {
+			if (slice.data) {
+				::free(slice.data);
+				slice.data = nullptr;
+			}
+
+			slice.len = 0;
+		}
 	};
 
+	// ministruct: non-stack allocated 2D T array
+	template<typename T>
+	struct Slice2 {
+		T* data;
+		size_t len;
+		size_t width, height;
+
+		T& operator[](i64 i) {
+			assert(i >= 0 && i < static_cast<i64>(len));
+			return data[i];
+		}
+
+		T& operator()(i64 x, i64 y) {
+			i64 idx = x + (y * width);
+			assert(idx >= 0 && idx < len);
+			return data[idx];
+		}
+
+		T* get_ptr(i64 x, i64 y) {
+			i64 idx = x + (y * width);
+			assert(idx >= 0 && idx < static_cast<i64>(len));
+			return &data[idx];
+		}
+
+		T& get(i64 x, i64 y) {
+			i64 idx = x + (y * width);
+			assert(idx >= 0 && idx < static_cast<i64>(len));
+			return data[idx];
+		}
+
+		// shorthand for allocating a Slice2<T> using malloc
+		static Slice2<T> alloc(size_t width, size_t height) {
+			Slice2<T> slice = { 0 };
+
+			slice.data = static_cast<T*>(malloc(width * height * sizeof(T)));
+
+			if (slice.data) {
+				slice.width = width;
+				slice.height = height;
+				slice.len = width * height;
+			}
+
+			return slice;
+		}
+
+		// shorthand for allocating a Slice2<T> using calloc
+		static Slice2<T> alloc0(size_t width, size_t height) {
+			Slice2<T> slice = { 0 };
+
+			slice.data = static_cast<T*>(calloc(width * height, sizeof(T)));
+
+			if (slice.data) {
+				slice.width = width;
+				slice.height = height;
+				slice.len = width * height;
+			}
+
+			return slice;
+		}
+
+		// shorthand for freeing a Slice2<T> using free
+		static void free(Slice2<T>& slice) {
+			if (slice.data) {
+				::free(slice.data);
+				slice.data = nullptr;
+			}
+
+			slice.len = 0;
+			slice.width = 0;
+			slice.height = 0;
+		}
+	};
+
+	// ministruct: as opposed to a regular Slice, try not to have this one own the data
 	struct StringSlice : public Slice<char> {
 		// checks if the start of the string is equal to some other string
-		bool starts_with(const char* other) {
+		bool starts_with(const char* other) const {
 			size_t otherLen = strlen(other);
 			if (len < otherLen) return false;
 
@@ -137,16 +272,22 @@ namespace tds {
 		}
 
 		// basically shifts the start of the string forwards by n characters
-		void eat_first(size_t n) {
+		char eat_first(size_t n) {
 			size_t actualN = tim::min(n, len);
 
+			if (actualN <= 0)
+				return 0;
+
+			char first = data[0];
 			data += actualN;
 			len -= actualN;
+			return first;
 		}
 
 		operator char*() { return data; }
 	};
 
+	// ministruct: static-sized bitset
 	template<u32 NumBits>
 	struct BitSet {
 		static constexpr u32 SIZE = ((NumBits + 7u) & ~(7u)) / 8;
@@ -170,18 +311,15 @@ namespace tds {
 
 		// I'm implementing this data structure to only be able to get bits with an operater overload
 		// as setting bits with an operator overload requires making a type that is supposed to get returned as a reference
-		// and that reference's constructor will do the settings... a bit complex, so i'll just leave it a regular function
+		// and that reference's constructor will be a setter... a bit complex, so i'll just leave it a regular function
 		bool operator[](u32 i) const { return get(i); }
 	};
 
+	// ministruct: linked list
 	template<typename T>
-	struct LinkedList {
-		struct Node {
-			Node* next;
-			T data;
-		};
-
-		Node start;
+	struct LinkedNode {
+		LinkedNode* next;
+		T data;
 	};
 
 	// simple range struct
@@ -191,7 +329,8 @@ namespace tds {
 		T count;
 	};
 
-	template<u32 Capacity, typename T>
+	// ministruct: static-sized stack
+	template<typename T, u32 Capacity>
 	struct Stack {
 		static constexpr u32 CAPACITY = Capacity;
 		
@@ -203,7 +342,12 @@ namespace tds {
 			size = 0;
 		}
 
-		bool push(T t) {
+		// NOTE: a good pattern would be to use these functions before
+		// popping or pushing to the stack to avoid crashing on an assert
+		bool empty() { return size <= 0; }
+		bool full() { return size >= CAPACITY; }
+
+		void push(T t) {
 			assert(size < CAPACITY);
 			data[size++] = t;
 		}
@@ -213,24 +357,22 @@ namespace tds {
 			return data[size--];
 		}
 
-		T peek(u32 pos) {
+		T peek() {
 			if (size <= 0) return 0;
 			return data[size - 1];
 		}
 	};
 
-	//template<typename T>
-	//struct Stack {
-	//};
-
-	template<u32 NumStates>
+	template<u16 NumStates>
 	struct StateMachine {
-		static constexpr u32 maxStates = NumStates;
+		static constexpr u16 maxStates = NumStates;
 		using StateFunction = void(*)(StateMachine<NumStates>&);
 
-		u32 prevState = 0;
-		u32 state = 0;
-		u32 nextState = 0;
+		// prevState and state are managed by the StateMachine
+		// but nextState should be set by the user to transition state
+		u16 prevState = 0;
+		u16 state = 0;
+		u16 nextState = 0;
 
 		// These can be set to true in case we want to tell the state machine
 		// to call the enter_state or exit_state functions again for some reason
@@ -244,11 +386,9 @@ namespace tds {
 		StateFunction onEnter = nullptr;  // global state enter function
 		StateFunction onExit = nullptr;   // global state exit function
 
-#define ASSERT_STATE_VALIDITY \
-	assert(state < maxStates); \
-	assert(nextState < maxStates);
+#define ASSERT_STATE_VALIDITY assert(state < maxStates); assert(nextState < maxStates);
 
-		void update() {
+		void tick() {
 			// enter_state is called
 			ASSERT_STATE_VALIDITY
 			if (nextState != state || signalEnter) {
@@ -283,8 +423,7 @@ namespace tds {
 	};
 }
 
-// Memory utilities
-
+// MEM = MEMory utilities
 namespace mem {
 	void init();
 	void close();
@@ -294,9 +433,9 @@ namespace mem {
 	// On Memory Arenas:
 	// https://www.rfleury.com/p/untangling-lifetimes-the-arena-allocator
 	struct Arena {
-#define push_struct(ptr, struc) push_data(ptr, sizeof(struc))
 		void alloc(u64 cap = 100000000LL); // 100 megabytes
 		void dealloc();
+		bool allocated() const { return capacity > 0; }
 
 		void clear();
 		void clear_decommit();
@@ -307,10 +446,10 @@ namespace mem {
 		void pop(size_t len);
 		void pop_to(size_t newPos);
 		
-		template <typename T>
-		T* push() { return (T*)push(sizeof(T)); }
-		template <typename T>
-		T* push_zero() { return (T*)push_zero(sizeof(T)); }
+		template <typename T> T* push() { return (T*)push(sizeof(T)); }
+		template <typename T> T* push(size_t numElements) { return (T*)push(sizeof(T) * numElements); }
+		template <typename T> T* push_zero() { return (T*)push_zero(sizeof(T)); }
+		template <typename T> T* push_zero(size_t numElements) { return (T*)push_zero(sizeof(T) * numElements); }
 
 		void* data;
 		size_t pos;
@@ -332,17 +471,32 @@ namespace mem {
 		bool releaseOnDestruct;
 	};
 
+	// Fixed-Size Block/Pool Allocators
+	// UNFINISHED
+	template<typename T>
+	struct Pool {
+		tds::Slice<T> memory;
+		Pool<T>* prev;
+		Pool<T>* next;
+	};
+
+	template<typename T>
+	struct PoolAllocator {
+		Pool<T> pool;
+		// TODO: maybe we want some reusable logic
+	};
+
 }
 
 #ifdef TINYDEF_IMPLEMENTATION
-
-#include <assert.h>
 
 #if defined(USING_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #elif defined(USING_UNIX)
-#error Memory abstractions not implemented for Unix-type systems!
+#error Memory abstractions haven't been tested for Unix!
+#include <unistd.h>
+#include <sys/mman.h>
 #else
 #error Memory abstractions not implemented for this platform!
 #endif
@@ -352,11 +506,10 @@ namespace mem {
 //
 
 namespace mem {
-
 	// 4096 is a common page size, but for it to actually be accurate,
 	// we need to set this using information obtained from the OS in mem::init()
-	u64 pageSize = 4096;
-	u64 round_to_page_size(u64 size) {
+	static u64 pageSize = 4096;
+	static u64 round_to_page_size(u64 size) {
 		u64 rem = size % pageSize;
 		size -= rem;
 		return size + pageSize;
@@ -388,24 +541,28 @@ namespace mem {
 	}
 
 #elif defined(USING_UNIX)
+	// NOTE: none of this code has been tested yet
+
 	inline u64 get_page_size() {
-		return 4096;
+		return (u64)sysconf(_SC_PAGE_SIZE);
 	}
 
 	inline void* _reserve(size_t cap) {
-		return nullptr;
+		void* ptr = mmap(nullptr, cap, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		return ptr == MAP_FAILED ? nullptr : ptr;
 	}
 
 	inline void* _commit(void* start, size_t size) {
-		return nullptr;
+		return mprotect(start, size, PROT_READ | PROT_WRITE) == 0 ? start : nullptr;
 	}
 
 	inline bool _release(void* region) {
-		return false;
+		return munmap(region, size) == 0;
 	}
 
 	inline bool _decommit(void* region, size_t size) {
-		return false;
+		return madvise(region, size, MADV_DONTNEED) == 0 &&
+			mprotect(region, size, PROT_NONE) == 0;
 	}
 
 #endif
@@ -435,6 +592,8 @@ namespace mem {
 	}
 
 	void Arena::alloc(u64 cap) {
+		pos = 0;
+
 		// we want to reserve a good spot between "too little" and "holy balls that's too much" memory
 		// when we encounter the problem of this actually being too little memory,
 		// we can probably either raise this size, or start chaining Arenas
@@ -449,11 +608,12 @@ namespace mem {
 		// added this, not sure if it's really required
 		clear_decommit();
 		// we can do profiling and testing for that
+		
+		mem::_release(data);
 
 		capacity = 0;
 		data = nullptr;
 
-		mem::_release(data);
 	}
 
 	// This function is called "peek", and while it might make sense for it to be called that
